@@ -8,6 +8,9 @@ Usage:
 
 Example:
     python clientsend.py 0x4AAAAAAAA... https://example.com 30
+
+
+Made by ismoiloff.
 """
 
 import sys
