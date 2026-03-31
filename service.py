@@ -12,9 +12,11 @@ POST /solve
 made by ismoiloff
 """
 
+
 import os
 import platform
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -25,6 +27,16 @@ from solver import solve
 
 
 PORT = int(os.environ.get("PORT", 8191))
+# How many Chrome instances to run in parallel.
+# Rule of thumb: ~500 MB RAM per worker. 4 workers = ~2 GB.
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
+
+# Semaphore caps concurrent Chrome instances; threads above the limit
+# block here (queued) until a slot opens — no requests are dropped.
+_worker_sem = threading.Semaphore(MAX_WORKERS)
+_active_count = 0
+_queued_count = 0
+_count_lock = threading.Lock()
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -44,7 +56,7 @@ def _ensure_display() -> Optional[subprocess.Popen]:
         stderr=subprocess.DEVNULL,
     )
     os.environ["DISPLAY"] = ":99"
-    time.sleep(0.5)  # give Xvfb a moment to start
+    time.sleep(0.5)
     print("[service] started Xvfb on :99")
     return xvfb
 
@@ -83,9 +95,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "sitekey and siteurl are required"})
             return
 
-        print(f"[service] solving sitekey={sitekey!r} url={siteurl!r}")
+        global _active_count, _queued_count
+
+        with _count_lock:
+            _queued_count += 1
+        print(f"[service] queued — sitekey={sitekey!r} url={siteurl!r} "
+              f"(active={_active_count}/{MAX_WORKERS} queued={_queued_count})")
+
+        # Block until a worker slot is free — other threads keep running
+        _worker_sem.acquire()
+
+        with _count_lock:
+            _queued_count -= 1
+            _active_count += 1
+
         t0 = time.time()
         try:
+            print(f"[service] solving sitekey={sitekey!r} url={siteurl!r} "
+                  f"(active={_active_count}/{MAX_WORKERS})")
             token = solve(sitekey, siteurl, timeout=timeout)
             elapsed = round(time.time() - t0, 2)
             print(f"[service] solved in {elapsed}s  token={token[:20]}...")
@@ -94,10 +121,20 @@ class Handler(BaseHTTPRequestHandler):
             elapsed = round(time.time() - t0, 2)
             print(f"[service] error after {elapsed}s: {exc}")
             self.send_json(500, {"error": str(exc)})
+        finally:
+            with _count_lock:
+                _active_count -= 1
+            _worker_sem.release()
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_json(200, {"status": "ok"})
+            with _count_lock:
+                self.send_json(200, {
+                    "status": "ok",
+                    "workers": MAX_WORKERS,
+                    "active": _active_count,
+                    "queued": _queued_count,
+                })
         else:
             self.send_json(404, {"error": "use POST /solve"})
 
@@ -106,6 +143,8 @@ if __name__ == "__main__":
     xvfb_proc = _ensure_display()
     server = ThreadedHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[service] Turnstile solver service running on http://0.0.0.0:{PORT}")
+    print(f"[service] worker pool: {MAX_WORKERS} concurrent Chrome instances "
+          f"(set MAX_WORKERS env var to change)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
