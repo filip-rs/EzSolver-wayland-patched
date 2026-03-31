@@ -163,7 +163,48 @@ print(f"Got token in {elapsed}s: {token}")
 
 ### `GET /health`
 
-Returns `{"status": "ok"}` — useful for uptime checks.
+Returns current service status — useful for uptime checks and monitoring queue depth.
+
+```json
+{ "status": "ok", "workers": 4, "active": 2, "queued": 5 }
+```
+
+---
+
+## Scaling
+
+EzSolver uses a **worker pool** to handle high volumes safely. Instead of spinning up unlimited Chrome instances (which would crash your machine), requests queue up and are processed as workers free up — no requests are dropped.
+
+```
+500 requests → queue → [worker 1] [worker 2] [worker 3] [worker 4] → tokens
+```
+
+**Rule of thumb:** each Chrome worker uses ~500 MB RAM.
+
+| Machine RAM | Recommended `MAX_WORKERS` | Throughput (est.) |
+|-------------|--------------------------|-------------------|
+| 2 GB | 2 | ~8 tokens/min |
+| 4 GB | 4 (default) | ~16 tokens/min |
+| 8 GB | 8 | ~32 tokens/min |
+| 16 GB+ | 16 | ~64 tokens/min |
+
+Set `MAX_WORKERS` when starting the service:
+
+```bash
+MAX_WORKERS=8 python service.py
+```
+
+Check the queue live via `/health`:
+
+```bash
+curl http://127.0.0.1:8191/health
+```
+
+```json
+{ "status": "ok", "workers": 8, "active": 6, "queued": 47 }
+```
+
+For truly massive scale (thousands of concurrent solves), run **multiple service instances** behind a load balancer (nginx, Caddy, etc.) across several machines.
 
 ---
 
@@ -174,10 +215,11 @@ Returns `{"status": "ok"}` — useful for uptime checks.
 | `CHROME_PATH` | auto-detected | Path to your Chrome executable |
 | `TS_PROFILE_DIR` | `%TEMP%\ts_profile` / `/tmp/ts_profile` | Persistent Chrome profile directory |
 | `PORT` | `8191` | Port the service listens on |
+| `MAX_WORKERS` | `4` | Max concurrent Chrome instances |
 
 **Example:**
 ```bash
-CHROME_PATH="/opt/chrome/chrome" PORT=9000 python service.py
+MAX_WORKERS=8 PORT=9000 python service.py
 ```
 
 ---
